@@ -121,14 +121,41 @@ const Room = (props) => {
     };
 
     function shareScreen() {
-        navigator.mediaDevices.getDisplayMedia({ cursor: true }).then(stream => {
-            const screenTrack = stream.getTracks()[0];
-            senders.current.find(sender => sender.track.kind === 'video').replaceTrack(screenTrack);
-            screenTrack.onended = function() {
-                senders.current.find(sender => sender.track.kind === "video").replaceTrack(userStream.current.getTracks()[1]);
-            }
-        })
+        navigator.mediaDevices.getDisplayMedia({ cursor: true })
+            .then((stream) => {
+                const screenTrack = stream.getTracks()[0];
+                const videoSender = senders.current.find(
+                    (sender) => sender.track && sender.track.kind === "video"
+                );
+    
+                if (videoSender) {
+                    videoSender.replaceTrack(screenTrack);
+                } else {
+                    console.error("No video sender found in senders.current.");
+                    stream.getTracks().forEach((track) => track.stop()); // Stop the screen track if no video sender is found
+                    return;
+                }
+    
+                screenTrack.onended = function () {
+                    const userVideoTrack = userStream.current
+                        .getTracks()
+                        .find((track) => track.kind === "video");
+    
+                    if (userVideoTrack && videoSender) {
+                        videoSender.replaceTrack(userVideoTrack);
+                    } else {
+                        console.error(
+                            "Failed to replace screen track with user video track."
+                        );
+                    }
+                };
+            })
+            .catch((error) => {
+                console.error("Error sharing screen:", error);
+            });
     }
+    
+    
 
     return (
         <div>
