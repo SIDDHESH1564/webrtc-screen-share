@@ -1,14 +1,13 @@
 import React, { useRef, useEffect } from "react";
 import io from "socket.io-client";
+import Peer from "simple-peer";
 
 const Room = (props) => {
     const userVideo = useRef();
     const partnerVideo = useRef();
-    const peerRef = useRef();
     const socketRef = useRef();
-    const otherUser = useRef();
     const userStream = useRef();
-    const senders = useRef([]);
+    const peerRef = useRef();
 
     useEffect(() => {
         navigator.mediaDevices.getUserMedia({ audio: true, video: true }).then(stream => {
@@ -18,148 +17,105 @@ const Room = (props) => {
             socketRef.current = io.connect("/");
             socketRef.current.emit("join room", props.match.params.roomID);
 
-            socketRef.current.on('other user', userID => {
-                callUser(userID);
-                otherUser.current = userID;
+            socketRef.current.on("room full", () => {
+                alert("Room is full!");
+                props.history.push('/');
+            });
+
+            socketRef.current.on("user left", () => {
+                if (peerRef.current) {
+                    peerRef.current.destroy();
+                }
+                if (partnerVideo.current) {
+                    partnerVideo.current.srcObject = null;
+                }
+            });
+
+            socketRef.current.on("other user", userID => {
+                const peer = createPeer(userID, true);
+                peerRef.current = peer;
             });
 
             socketRef.current.on("user joined", userID => {
-                otherUser.current = userID;
+                const peer = createPeer(userID, false);
+                peerRef.current = peer;
             });
 
-            socketRef.current.on("offer", handleRecieveCall);
-
-            socketRef.current.on("answer", handleAnswer);
-
-            socketRef.current.on("ice-candidate", handleNewICECandidateMsg);
+            socketRef.current.on("signal", payload => {
+                peerRef.current.signal(payload.signal);
+            });
         });
 
-    }, []);
+        // Cleanup on component unmount
+        return () => {
+            if (socketRef.current) {
+                socketRef.current.disconnect();
+            }
+            if (peerRef.current) {
+                peerRef.current.destroy();
+            }
+            if (userStream.current) {
+                userStream.current.getTracks().forEach(track => track.stop());
+            }
+        };
+    }, [props.history]);
 
-    function callUser(userID) {
-        peerRef.current = createPeer(userID);
-        userStream.current.getTracks().forEach(track => senders.current.push(peerRef.current.addTrack(track, userStream.current)));
-    }
-
-    function createPeer(userID) {
-        const peer = new RTCPeerConnection({
-            iceServers: [
-                {
-                    urls: "stun:stun.stunprotocol.org"
-                },
-                {
-                    urls: 'turn:numb.viagenie.ca',
-                    credential: 'muazkh',
-                    username: 'webrtc@live.com'
-                },
-            ]
+    function createPeer(userID, initiator) {
+        const peer = new Peer({
+            initiator,
+            trickle: false,
+            stream: userStream.current
         });
 
-        peer.onicecandidate = handleICECandidateEvent;
-        peer.ontrack = handleTrackEvent;
-        peer.onnegotiationneeded = () => handleNegotiationNeededEvent(userID);
+        peer.on("signal", signal => {
+            socketRef.current.emit("signal", { target: userID, signal });
+        });
+
+        peer.on("stream", stream => {
+            partnerVideo.current.srcObject = stream;
+        });
 
         return peer;
     }
 
-    function handleNegotiationNeededEvent(userID) {
-        peerRef.current.createOffer().then(offer => {
-            return peerRef.current.setLocalDescription(offer);
-        }).then(() => {
-            const payload = {
-                target: userID,
-                caller: socketRef.current.id,
-                sdp: peerRef.current.localDescription
-            };
-            socketRef.current.emit("offer", payload);
-        }).catch(e => console.log(e));
-    }
-
-    function handleRecieveCall(incoming) {
-        peerRef.current = createPeer();
-        const desc = new RTCSessionDescription(incoming.sdp);
-        peerRef.current.setRemoteDescription(desc).then(() => {
-            userStream.current.getTracks().forEach(track => peerRef.current.addTrack(track, userStream.current));
-        }).then(() => {
-            return peerRef.current.createAnswer();
-        }).then(answer => {
-            return peerRef.current.setLocalDescription(answer);
-        }).then(() => {
-            const payload = {
-                target: incoming.caller,
-                caller: socketRef.current.id,
-                sdp: peerRef.current.localDescription
-            }
-            socketRef.current.emit("answer", payload);
-        })
-    }
-
-    function handleAnswer(message) {
-        const desc = new RTCSessionDescription(message.sdp);
-        peerRef.current.setRemoteDescription(desc).catch(e => console.log(e));
-    }
-
-    function handleICECandidateEvent(e) {
-        if (e.candidate) {
-            const payload = {
-                target: otherUser.current,
-                candidate: e.candidate,
-            }
-            socketRef.current.emit("ice-candidate", payload);
-        }
-    }
-
-    function handleNewICECandidateMsg(incoming) {
-        const candidate = new RTCIceCandidate(incoming);
-
-        peerRef.current.addIceCandidate(candidate)
-            .catch(e => console.log(e));
-    }
-
-    function handleTrackEvent(e) {
-        partnerVideo.current.srcObject = e.streams[0];
-    };
-
     function shareScreen() {
-        navigator.mediaDevices.getDisplayMedia({ cursor: true })
-            .then((stream) => {
-                const screenTrack = stream.getTracks()[0];
-                const videoSender = senders.current.find(
-                    (sender) => sender.track && sender.track.kind === "video"
+        navigator.mediaDevices.getDisplayMedia({ cursor: true }).then(stream => {
+            const screenTrack = stream.getTracks()[0];
+            
+            if (peerRef.current) {
+                // Get all tracks from current peer connection
+                const videoTrack = userStream.current.getVideoTracks()[0];
+                
+                // Replace track in peer connection
+                peerRef.current.replaceTrack(
+                    videoTrack,
+                    screenTrack,
+                    userStream.current
                 );
-    
-                if (videoSender) {
-                    videoSender.replaceTrack(screenTrack);
-                } else {
-                    console.error("No video sender found in senders.current.");
-                    stream.getTracks().forEach((track) => track.stop()); // Stop the screen track if no video sender is found
-                    return;
-                }
-    
-                screenTrack.onended = function () {
-                    const userVideoTrack = userStream.current
-                        .getTracks()
-                        .find((track) => track.kind === "video");
-    
-                    if (userVideoTrack && videoSender) {
-                        videoSender.replaceTrack(userVideoTrack);
-                    } else {
-                        console.error(
-                            "Failed to replace screen track with user video track."
-                        );
-                    }
+
+                // Show screen share in local video
+                userVideo.current.srcObject = stream;
+
+                screenTrack.onended = () => {
+                    // When screen sharing stops, revert back to user video
+                    peerRef.current.replaceTrack(
+                        screenTrack,
+                        videoTrack,
+                        userStream.current
+                    );
+                    
+                    // Revert local video display
+                    userVideo.current.srcObject = userStream.current;
                 };
-            })
-            .catch((error) => {
-                console.error("Error sharing screen:", error);
-            });
+            }
+        }).catch(err => {
+            console.error("Error sharing screen:", err);
+        });
     }
-    
-    
 
     return (
         <div>
-            <video controls style={{height: 500, width: 500}} autoPlay ref={userVideo} />
+            <video controls style={{height: 500, width: 500}} autoPlay ref={userVideo} muted />
             <video controls style={{height: 500, width: 500}} autoPlay ref={partnerVideo} />
             <button onClick={shareScreen}>Share screen</button>
         </div>
