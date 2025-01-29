@@ -2,6 +2,8 @@ import React, { useRef, useEffect, useState } from "react";
 import io from "socket.io-client";
 import Peer from "simple-peer";
 
+const BACKEND_URL = "https://d4ad-49-36-49-143.ngrok-free.app";
+
 const Room = (props) => {
     const [messages, setMessages] = useState([]);
     const [message, setMessage] = useState("");
@@ -12,7 +14,14 @@ const Room = (props) => {
     const screenStream = useRef();
 
     useEffect(() => {
-        socketRef.current = io.connect("/");
+        // Connect to the deployed backend
+        socketRef.current = io(BACKEND_URL, {
+            transports: ['websocket'],
+            cors: {
+                origin: "*"
+            }
+        });
+
         socketRef.current.emit("join room", props.match.params.roomID);
 
         socketRef.current.on("room full", () => {
@@ -41,6 +50,10 @@ const Room = (props) => {
 
         socketRef.current.on("signal", payload => {
             peerRef.current.signal(payload.signal);
+        });
+
+        socketRef.current.on("connect_error", (error) => {
+            console.error("Socket connection error:", error);
         });
 
         return () => {
@@ -156,9 +169,17 @@ const Room = (props) => {
                         Stop Sharing
                     </button>
                 )}
+                <div style={{
+                    marginLeft: 'auto',
+                    padding: '8px',
+                    backgroundColor: '#e9ecef',
+                    borderRadius: '4px'
+                }}>
+                    Room ID: {props.match.params.roomID}
+                </div>
             </div>
 
-            {/* Screen sharing area - removed outer border */}
+            {/* Screen sharing area */}
             <div style={{ 
                 height: '40vh',
                 display: 'flex',
@@ -178,7 +199,7 @@ const Room = (props) => {
                 />
             </div>
 
-            {/* Chat area - increased relative size */}
+            {/* Chat area */}
             <div style={{ 
                 flex: 1,
                 borderTop: '1px solid #ccc',
@@ -186,7 +207,12 @@ const Room = (props) => {
                 flexDirection: 'column',
                 padding: '10px'
             }}>
-                <div style={{ marginBottom: '20px', maxHeight: '20vh', overflow: 'auto' }}>
+                <div style={{ 
+                    flex: 1,
+                    marginBottom: '20px', 
+                    overflow: 'auto',
+                    padding: '10px'
+                }}>
                     {messages.map((msg, idx) => (
                         <div key={idx} style={{
                             textAlign: msg.fromMe ? 'right' : 'left',
@@ -197,7 +223,9 @@ const Room = (props) => {
                                 color: msg.fromMe ? 'white' : 'black',
                                 padding: '5px 10px',
                                 borderRadius: '10px',
-                                display: 'inline-block'
+                                display: 'inline-block',
+                                maxWidth: '70%',
+                                wordWrap: 'break-word'
                             }}>
                                 {msg.text}
                             </span>
@@ -205,14 +233,36 @@ const Room = (props) => {
                     ))}
                 </div>
                 
-                <form onSubmit={sendMessage} style={{ display: 'flex' }}>
+                <form onSubmit={sendMessage} style={{ 
+                    display: 'flex',
+                    gap: '10px',
+                    padding: '10px',
+                    borderTop: '1px solid #dee2e6'
+                }}>
                     <input 
                         value={message}
                         onChange={e => setMessage(e.target.value)}
-                        style={{ flex: 1, marginRight: '10px', padding: '5px' }}
+                        style={{ 
+                            flex: 1,
+                            padding: '8px',
+                            borderRadius: '4px',
+                            border: '1px solid #ced4da'
+                        }}
                         placeholder="Type a message..."
                     />
-                    <button type="submit">Send</button>
+                    <button 
+                        type="submit"
+                        style={{
+                            padding: '8px 16px',
+                            backgroundColor: '#007bff',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: 'pointer'
+                        }}
+                    >
+                        Send
+                    </button>
                 </form>
             </div>
         </div>
