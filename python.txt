@@ -1,0 +1,292 @@
+import socketio
+import asyncio
+import sys
+import json
+import logging
+import aioconsole
+import traceback
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel
+from aiortc.contrib.signaling import object_from_string, object_to_string
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+class WebRTCClient:
+    def __init__(self, server_url, room_id):
+        self.sio = socketio.AsyncClient(
+            logger=True,
+            reconnection=True,
+            reconnection_attempts=5,
+            reconnection_delay=1,
+            engineio_logger=True,
+            ssl_verify=False
+        )
+        
+        self.server_url = server_url
+        self.room_id = room_id
+        self.connected = False
+        self.running = True
+        self.peer_id = None
+        
+        # WebRTC objects
+        self.pc = None
+        self.dc = None
+        
+        # Register socket event handlers
+        self.sio.on('connect', self.on_connect)
+        self.sio.on('disconnect', self.on_disconnect)
+        self.sio.on('room full', self.on_room_full)
+        self.sio.on('other user', self.on_other_user)
+        self.sio.on('user joined', self.on_user_joined)
+        self.sio.on('user left', self.on_user_left)
+        self.sio.on('signal', self.on_signal)
+
+    async def setup_peer_connection(self, initiator=False):
+        self.pc = RTCPeerConnection()
+        
+        if initiator:
+            # Create data channel if we're the initiator
+            self.dc = self.pc.createDataChannel('chat')
+            self.setup_data_channel(self.dc)
+            
+            # Create and send offer
+            offer = await self.pc.createOffer()
+            await self.pc.setLocalDescription(offer)
+            
+            # Convert offer to simple-peer compatible format
+            signal_data = {
+                'type': offer.type,
+                'sdp': offer.sdp
+            }
+            
+            if self.peer_id:
+                await self.sio.emit('signal', {
+                    'target': self.peer_id,
+                    'signal': signal_data
+                })
+        else:
+            @self.pc.on('datachannel')
+            def on_datachannel(channel):
+                self.dc = channel
+                self.setup_data_channel(channel)
+
+    def setup_data_channel(self, channel):
+        @channel.on('open')
+        def on_open():
+            logger.info("Data channel opened")
+            print("\nPeer connection established! You can now send messages.")
+
+        @channel.on('message')
+        def on_message(message):
+            try:
+                if isinstance(message, bytes):
+                    # Decode bytes to string for bytes messages
+                    decoded = message.decode('utf-8')
+                    print(f"\n📨 Received message: {decoded}")
+                elif isinstance(message, str):
+                    print(f"\n📨 Received message: {message}")
+                else:
+                    print(f"\n📨 Received data message: {message}")
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
+
+        @channel.on('close')
+        def on_close():
+            logger.info("Data channel closed")
+            print("\nPeer connection closed.")
+
+    async def on_connect(self):
+        logger.info("✓ Connected to server successfully")
+        self.connected = True
+
+    async def on_disconnect(self):
+        logger.info("× Disconnected from server")
+        self.connected = False
+
+    async def on_room_full(self):
+        logger.warning("Room is full, disconnecting...")
+        await self.disconnect()
+
+    async def on_other_user(self, user_id):
+        logger.info(f"→ Other user in room: {user_id}")
+        self.peer_id = user_id
+        await self.setup_peer_connection(initiator=True)
+
+    async def on_user_joined(self, user_id):
+        logger.info(f"→ New user joined: {user_id}")
+        self.peer_id = user_id
+        await self.setup_peer_connection(initiator=False)
+
+    async def on_user_left(self):
+        logger.info("← User left the room")
+        self.peer_id = None
+        if self.pc:
+            await self.pc.close()
+        self.pc = None
+        self.dc = None
+
+    async def on_signal(self, data):
+        try:
+            logger.info(f"↔ Received signal from peer")
+            signal = data.get('signal', {})
+            
+            if not self.pc:
+                logger.info("Creating new peer connection")
+                await self.setup_peer_connection(initiator=False)
+            
+            if signal.get('type') == 'offer':
+                # Handle incoming offer
+                offer = RTCSessionDescription(sdp=signal['sdp'], type=signal['type'])
+                await self.pc.setRemoteDescription(offer)
+                
+                # Create and send answer
+                answer = await self.pc.createAnswer()
+                await self.pc.setLocalDescription(answer)
+                
+                signal_data = {
+                    'type': answer.type,
+                    'sdp': answer.sdp
+                }
+                
+                await self.sio.emit('signal', {
+                    'target': self.peer_id,
+                    'signal': signal_data
+                })
+                
+            elif signal.get('type') == 'answer':
+                # Handle incoming answer
+                answer = RTCSessionDescription(sdp=signal['sdp'], type=signal['type'])
+                await self.pc.setRemoteDescription(answer)
+                
+        except Exception as e:
+            logger.error(f"Error handling signal: {e}")
+            logger.error(traceback.format_exc())
+
+    async def send_message(self, message):
+        if not self.dc or self.dc.readyState != 'open':
+            logger.error("Data channel not ready")
+            return False
+
+        try:
+            # Format message as UTF-8 bytes to match simple-peer
+            if isinstance(message, str):
+                message_bytes = message.encode('utf-8')
+                self.dc.send(message_bytes)  # Send as bytes
+            else:
+                self.dc.send(message)
+                
+            logger.info(f"✓ Sent message: {message}")
+            return True
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return False
+
+    async def connect(self):
+        try:
+            logger.debug(f"Starting connection to {self.server_url}")
+            
+            await self.sio.connect(
+                self.server_url,
+                transports=['websocket'],
+                wait_timeout=30,
+                headers={
+                    'Origin': '*'
+                }
+            )
+            
+            if self.sio.connected:
+                logger.info("Socket connected successfully")
+                await self.sio.emit('join room', self.room_id)
+                logger.info(f"Joined room: {self.room_id}")
+                return True
+            else:
+                logger.error("Socket failed to connect")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Connection error: {str(e)}")
+            return False
+
+    async def disconnect(self):
+        try:
+            self.running = False
+            if self.pc:
+                await self.pc.close()
+            if self.connected:
+                await self.sio.disconnect()
+            self.connected = False
+            logger.info("Disconnected from server")
+        except Exception as e:
+            logger.error(f"Error during disconnect: {str(e)}")
+
+async def message_loop(client):
+    """Handle user input for sending messages"""
+    print("\nWaiting for peer to connect...")
+    while client.running:
+        try:
+            message = await aioconsole.ainput("\nEnter message (or 'quit' to exit): ")
+            
+            if message.lower() == 'quit':
+                client.running = False
+                break
+                
+            if message.strip():
+                await client.send_message(message)
+        except Exception as e:
+            logger.error(f"Error in message loop: {e}")
+            break
+
+async def main(server_url, room_id):
+    client = None
+    try:
+        logger.debug("Initializing WebRTC client...")
+        client = WebRTCClient(server_url, room_id)
+        
+        logger.info(f"Connecting to room {room_id} at {server_url}")
+        
+        if await client.connect():
+            message_task = asyncio.create_task(message_loop(client))
+            
+            while client.running:
+                await asyncio.sleep(1)
+            
+            message_task.cancel()
+            try:
+                await message_task
+            except asyncio.CancelledError:
+                pass
+        
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
+    except Exception as e:
+        logger.error(f"Main loop error: {str(e)}")
+        raise
+    finally:
+        if client:
+            await client.disconnect()
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) != 2:
+            print("Usage: python video.py <room_id>")
+            sys.exit(1)
+        
+        SERVER_URL = "https://27ef-49-36-51-193.ngrok-free.app"
+        ROOM_ID = sys.argv[1]
+        
+        print("\n=== WebRTC Chat Client ===")
+        print(f"Room ID: {ROOM_ID}")
+        print("Type 'quit' to exit")
+        print("================================\n")
+        
+        asyncio.run(main(SERVER_URL, ROOM_ID))
+        
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    except Exception as e:
+        logger.error("Fatal error occurred:")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
