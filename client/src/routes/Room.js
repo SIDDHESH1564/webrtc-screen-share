@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useState, useCallback } from "react";
 import io from "socket.io-client";
 import Peer from "simple-peer";
 
-const BACKEND_URL = "https://27ef-49-36-51-193.ngrok-free.app";
+const BACKEND_URL = "https://1451-20-197-35-195.ngrok-free.app";
 
 const Room = (props) => {
     const [messages, setMessages] = useState([]);
