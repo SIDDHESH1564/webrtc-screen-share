@@ -10,8 +10,8 @@ const Room = (props) => {
     const peerRef = useRef();
 
     useEffect(() => {
-        navigator.mediaDevices.getUserMedia({ audio: true, video: true }).then(stream => {
-            userVideo.current.srcObject = stream;
+        // Only get audio stream initially
+        navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(stream => {
             userStream.current = stream;
 
             socketRef.current = io.connect("/");
@@ -83,29 +83,22 @@ const Room = (props) => {
             const screenTrack = stream.getTracks()[0];
             
             if (peerRef.current) {
-                // Get all tracks from current peer connection
-                const videoTrack = userStream.current.getVideoTracks()[0];
-                
-                // Replace track in peer connection
-                peerRef.current.replaceTrack(
-                    videoTrack,
-                    screenTrack,
-                    userStream.current
-                );
+                // Add screen track to peer connection
+                peerRef.current.addTrack(screenTrack, stream);
 
                 // Show screen share in local video
                 userVideo.current.srcObject = stream;
 
                 screenTrack.onended = () => {
-                    // When screen sharing stops, revert back to user video
-                    peerRef.current.replaceTrack(
-                        screenTrack,
-                        videoTrack,
-                        userStream.current
+                    // Remove screen sharing track when ended
+                    peerRef.current.removeTrack(
+                        peerRef.current.getSenders().find(sender => 
+                            sender.track.kind === "video"
+                        )
                     );
                     
-                    // Revert local video display
-                    userVideo.current.srcObject = userStream.current;
+                    // Clear local video display
+                    userVideo.current.srcObject = null;
                 };
             }
         }).catch(err => {
@@ -115,7 +108,7 @@ const Room = (props) => {
 
     return (
         <div>
-            <video controls style={{height: 500, width: 500}} autoPlay ref={userVideo} muted />
+            <video controls style={{height: 500, width: 500, display: 'none'}} autoPlay ref={userVideo} muted />
             <video controls style={{height: 500, width: 500}} autoPlay ref={partnerVideo} />
             <button onClick={shareScreen}>Share screen</button>
         </div>
